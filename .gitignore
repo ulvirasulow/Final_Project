@@ -1,0 +1,4 @@
+.venv/
+.venv-wsl/
+.env
+data-generation/output/

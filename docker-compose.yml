@@ -1,0 +1,151 @@
+x-airflow-common: &airflow-common
+  build:
+    context: ./docker/airflow
+    args:
+      DOCKER_GID: ${DOCKER_GID:-999}
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_DB_NAME}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+    AIRFLOW_UID: ${AIRFLOW_UID:-50000}
+    POSTGRES_DB: ${POSTGRES_DB}
+    POSTGRES_USER: ${POSTGRES_USER}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  volumes:
+    - ./airflow-dags:/opt/airflow/dags
+    - ./spark-jobs:/opt/airflow/spark-jobs
+    - ./config:/opt/airflow/config
+    - airflow_logs:/opt/airflow/logs
+    - /var/run/docker.sock:/var/run/docker.sock
+    - ./data-generation:/opt/airflow/data-generation
+    - ./postgres-init:/opt/airflow/postgres-init
+  depends_on:
+    postgres:
+      condition: service_healthy
+  networks:
+    - project1-network
+
+services:
+
+  postgres:
+    image: postgres:16
+    container_name: project1-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - project1-network
+
+  minio:
+    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
+    container_name: project1-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - project1-network
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: project1-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ./docker/minio/init-bucket.sh:/init-bucket.sh:ro
+    entrypoint: ["/bin/sh", "/init-bucket.sh"]
+    networks:
+      - project1-network
+
+  spark:
+    build:
+      context: ./docker/spark
+    container_name: project1-spark
+    environment:
+      PYTHONPATH: /opt/spark-jobs
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./spark-jobs:/opt/spark-jobs
+      - ./config:/opt/spark-config
+      - ./scripts:/opt/scripts
+    depends_on:
+      - minio
+      - postgres
+    tty: true
+    networks:
+      - project1-network
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: project1-airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username "${AIRFLOW_ADMIN_USER}" \
+          --password "${AIRFLOW_ADMIN_PASSWORD}" \
+          --firstname Junior \
+          --lastname Engineer \
+          --role Admin \
+          --email "${AIRFLOW_ADMIN_EMAIL}" || true
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: project1-airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: project1-airflow-scheduler
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
+  minio_data:
+  airflow_logs:
+
+networks:
+  project1-network:
+    driver: bridge
