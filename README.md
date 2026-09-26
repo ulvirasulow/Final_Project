@@ -121,8 +121,3 @@ docker compose down -v
 docker compose up -d --build
 ```
 
-## Project status
-
-**Implementation:** complete — generation, loading, Bronze, Silver +
-quarantine, Gold (with SCD Type 2), the full Airflow DAG, and the
-verification harness all exist and pass static/syntax checks.
